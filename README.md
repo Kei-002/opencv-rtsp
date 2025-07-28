@@ -104,7 +104,7 @@ python human_detection.py
 - The script will display the camera feed with bounding boxes around detected humans
 - FPS is displayed in the top-left corner
 
-#### Option 2: Stream to VLC
+#### Option 2: Stream to VLC (DOES NOT WORK ATM)
 
 1. Activate the virtual environment (if not already activated):
 ```
