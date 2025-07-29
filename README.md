@@ -31,7 +31,7 @@ These scripts are based on work by [EdjeElectronics](https://github.com/EdjeElec
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/yolo-detection.git
+   git clone https://github.com/Kei-002/yolo-detection.git
    cd yolo-detection
    ```
 
