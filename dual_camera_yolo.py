@@ -10,15 +10,21 @@ import numpy as np
 from ultralytics import YOLO
 
 # Define and parse user input arguments
+# RTSP URL - replace with your camera's RTSP URL
+# Using a local VLC stream for testing
+rtsp_url1 = "rtsp://127.0.0.1:8554/video"
+rtsp_url2 = "rtsp://127.0.0.1:8555/video"
+yolo_model = "yolov8n.pt"
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', help='Path to YOLO model file (example: "yolov8n.pt")',
-                    default='yolov8n.pt')
+                    default=yolo_model)
 parser.add_argument('--source1', help='First camera source: can be RTSP stream URL ("rtsp://..."), \
                     video file ("testvid.mp4"), or index of USB camera ("0")', 
-                    default='rtsp://127.0.0.1:8554/video')
+                    default=rtsp_url1)
 parser.add_argument('--source2', help='Second camera source: can be RTSP stream URL ("rtsp://..."), \
                     video file ("testvid.mp4"), or index of USB camera ("1")',
-                    default='rtsp://127.0.0.1:8555/video')
+                    default=rtsp_url2)
 parser.add_argument('--thresh', help='Minimum confidence threshold for displaying detected objects (example: "0.4")',
                     default=0.5, type=float)
 parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480")',
