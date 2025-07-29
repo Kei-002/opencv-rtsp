@@ -1,316 +1,385 @@
 #!/usr/bin/env python3
+import os
+import sys
+import argparse
+import time
+import threading
+import queue
 
 import cv2
 import numpy as np
-import time
-import threading
 from ultralytics import YOLO
-import torch
-import queue
 
-class RTSPCamera:
-    def __init__(self, name, rtsp_url, model):
-        self.name = name
-        self.rtsp_url = rtsp_url
-        self.model = model
-        self.running = False
-        self.frame_queue = queue.Queue(maxsize=1)
-        self.result_queue = queue.Queue(maxsize=1)
-        self.fps = 0
-        self.frame_count = 0
-        self.start_time = time.time()
-        # Store the last detected boxes to display between detections
-        self.last_detected_boxes = []
-        self.last_boxes_update_time = time.time()
-        self.max_box_age = 3.0  # Max age for boxes before they're considered stale (seconds)
-    
-    def start(self):
-        self.running = True
-        # Start camera reader thread
-        self.camera_thread = threading.Thread(target=self.camera_reader)
-        self.camera_thread.daemon = True
-        self.camera_thread.start()
-        
-        # Start frame processor thread
-        self.processor_thread = threading.Thread(target=self.frame_processor)
-        self.processor_thread.daemon = True
-        self.processor_thread.start()
-        
-        return self
-    
-    def camera_reader(self):
-        print(f"Starting camera thread for {self.name} with URL: {self.rtsp_url}")
-        # Use FFMPEG backend for better RTSP handling
-        cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-        
-        # Set buffer size to 1 for lower latency
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        # Set a much lower resolution for better performance on Raspberry Pi
-        resolution_width = 192   # Further reduced for Pi 4
-        resolution_height = 144  # Further reduced for Pi 4
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution_height)
-        
-        # Try to set a lower FPS for Pi 4
-        cap.set(cv2.CAP_PROP_FPS, 3)  # Reduced to 3 FPS
-        
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                print(f"Error: Failed to receive frame from {self.name}")
-                time.sleep(0.5)  # Wait before retrying
-                # Try to reconnect
-                cap.release()
-                cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution_width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution_height)
-                cap.set(cv2.CAP_PROP_FPS, 3)
-                continue
-            
-            # Put the frame in the queue, replacing any old frame
-            try:
-                # If queue is full, remove the old frame
-                if self.frame_queue.full():
-                    self.frame_queue.get_nowait()
-                self.frame_queue.put_nowait(frame.copy())
-            except queue.Full:
-                pass  # Skip this frame if queue is full
-            
-            # Sleep a tiny bit to avoid hogging CPU
-            time.sleep(0.03)  # Increased sleep time to reduce CPU usage
-        
-        cap.release()
-    
-    def frame_processor(self):
-        detection_count = 0
-        last_detection_time = time.time()
-        detection_interval = 0.8  # Reduced from 1.0 second to 0.8 seconds
-        
-        # Create a persistent detection frame to avoid reallocating memory
-        detection_frame = None
-        
-        while self.running:
-            try:
-                # Get a frame from the queue
-                frame = self.frame_queue.get(timeout=0.5)
-                
-                # Create a copy for display
-                display_frame = frame.copy()
-                
-                # Calculate FPS
-                self.frame_count += 1
-                current_time = time.time()
-                elapsed = current_time - self.start_time
-                if elapsed >= 1.0:
-                    self.fps = self.frame_count / elapsed
-                    self.frame_count = 0
-                    self.start_time = current_time
-                
-                # Add camera name and FPS
-                cv2.putText(display_frame, f"{self.name}: {self.fps:.1f}", (5, 15), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                
-                # Check if it's time to run detection
-                if current_time - last_detection_time > detection_interval:
-                    last_detection_time = current_time
-                    detection_count += 1
-                    
-                    # Resize to very low resolution for detection (even smaller for Pi 4)
-                    if detection_frame is None or detection_frame.shape[0] != 64 or detection_frame.shape[1] != 96:
-                        detection_frame = cv2.resize(frame, (96, 64))  # Even smaller for detection on Pi 4
-                    else:
-                        cv2.resize(frame, (96, 64), dst=detection_frame)
-                    
-                    # Run detection with higher confidence threshold
-                    try:
-                        results = self.model(detection_frame, classes=0, verbose=False, conf=0.5, iou=0.5)
-                        
-                        # Process results
-                        person_detected = False
-                        for result in results:
-                            boxes = result.boxes
-                            
-                            if len(boxes) > 0:
-                                person_detected = True
-                                print(f"{self.name} - Detected {len(boxes)} person(s)")
-                                
-                                # Update the last detected boxes
-                                self.last_detected_boxes = []
-                                for box in boxes:
-                                    # Get box coordinates and scale to original frame
-                                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                                    # Scale coordinates back to original frame size
-                                    x1 = int(x1 * (frame.shape[1] / detection_frame.shape[1]))
-                                    y1 = int(y1 * (frame.shape[0] / detection_frame.shape[0]))
-                                    x2 = int(x2 * (frame.shape[1] / detection_frame.shape[1]))
-                                    y2 = int(y2 * (frame.shape[0] / detection_frame.shape[0]))
-                                    conf = float(box.conf[0])
-                                    self.last_detected_boxes.append((x1, y1, x2, y2, conf))
-                                
-                                # Update the timestamp when boxes were last updated
-                                self.last_boxes_update_time = current_time
-                        
-                        # If no person detected after several attempts, log it
-                        if detection_count >= 5 and not person_detected:
-                            print(f"{self.name} - No persons detected in the last 5 attempts.")
-                            detection_count = 0
-                    
-                    except Exception as e:
-                        print(f"Error in detection for {self.name}: {str(e)}")
-                
-                # Check if boxes are stale and should be cleared
-                if current_time - self.last_boxes_update_time > self.max_box_age:
-                    self.last_detected_boxes = []
-                
-                # Always draw the last detected boxes (persistent display)
-                if self.last_detected_boxes:
-                    for x1, y1, x2, y2, conf in self.last_detected_boxes:
-                        # Draw bounding box
-                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-                        
-                        # Only add text for high confidence detections
-                        if conf > 0.6:
-                            # Use smaller font
-                            cv2.putText(display_frame, f"{conf:.2f}", (x1, y1 - 2), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
-                
-                # Put the processed frame in the result queue
-                try:
-                    # If queue is full, remove the old frame
-                    if self.result_queue.full():
-                        self.result_queue.get_nowait()
-                    self.result_queue.put_nowait(display_frame)
-                except queue.Full:
-                    pass  # Skip this frame if queue is full
-                
-            except queue.Empty:
-                # No frame available
-                pass
-            
-            # Sleep a tiny bit to avoid hogging CPU
-            time.sleep(0.03)  # Increased sleep time to reduce CPU usage
-    
-    def get_frame(self):
-        try:
-            return self.result_queue.get(timeout=0.1)
-        except queue.Empty:
-            return None
-    
-    def stop(self):
-        self.running = False
-        if hasattr(self, 'camera_thread'):
-            self.camera_thread.join(timeout=1.0)
-        if hasattr(self, 'processor_thread'):
-            self.processor_thread.join(timeout=1.0)
+# Define and parse user input arguments
+# RTSP URL - replace with your camera's RTSP URL
+# Using a local VLC stream for testing
+rtsp_url1 = "rtsp://127.0.0.1:8554/video"
+rtsp_url2 = "rtsp://127.0.0.1:8555/video"
+yolo_model = "yolov8n.pt"
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', help='Path to YOLO model file (example: "yolov8n.pt")',
+                    default=yolo_model)
+parser.add_argument('--source1', help='First camera source: can be RTSP stream URL ("rtsp://..."), \
+                    video file ("testvid.mp4"), or index of USB camera ("0")', 
+                    default=rtsp_url1)
+parser.add_argument('--source2', help='Second camera source: can be RTSP stream URL ("rtsp://..."), \
+                    video file ("testvid.mp4"), or index of USB camera ("1")',
+                    default=rtsp_url2)
+parser.add_argument('--thresh', help='Minimum confidence threshold for displaying detected people (example: "0.4")',
+                    default=0.5, type=float)
+parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480")',
+                    default='640x480')
+parser.add_argument('--record', help='Record results from both cameras and save them as "camera1_people.avi" and "camera2_people.avi"',
+                    action='store_true')
+parser.add_argument('--show-fps', help='Display FPS counter on the video',
+                    action='store_true', default=True)
 
-def main():
-    # Try to use CUDA if available, but on Pi 4 it will use CPU
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-    
-    # RTSP URLs - replace with your camera URLs
-    rtsp_url1 = "rtsp://127.0.0.1:8554/video"
-    rtsp_url2 = "rtsp://127.0.0.1:8554/video"  # Fallback to pattern if the first one doesn't work
-    
-    # Load the YOLOv8 model once and share it
-    print("Loading YOLOv8 model...")
-    model = YOLO('yolov8n.pt')  # Using the smallest model for better performance on Pi 4
-    model.to(device)
-    print("Model loaded successfully")
-    
-    # Create camera objects
-    camera1 = RTSPCamera("Cam1", rtsp_url1, model)
-    camera2 = RTSPCamera("Cam2", rtsp_url2, model)
-    
-    # Start the camera threads
-    camera1.start()
-    camera2.start()
-    
-    print("Dual camera human detection started. Press 'q' to quit.")
-    
-    # Give some time for cameras to initialize
-    time.sleep(2)
-    
-    # Variables for FPS calculation
-    frame_count = 0
-    start_time = time.time()
-    
-    # Create a black frame as fallback for when cameras aren't working
-    fallback_frame = np.zeros((144, 192, 3), dtype=np.uint8)
-    cv2.putText(fallback_frame, "Camera not available", (10, 70), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-    
-    # Create the window early to ensure it's always displayed
-    cv2.namedWindow('Dual Camera Human Detection', cv2.WINDOW_NORMAL)
-    
+args = parser.parse_args()
+
+# Parse user inputs
+model_path = args.model
+source1 = args.source1
+source2 = args.source2
+min_thresh = args.thresh
+user_res = args.resolution
+record = args.record
+show_fps = args.show_fps
+
+# Parse resolution
+resW, resH = map(int, user_res.split('x'))
+
+# Check if model file exists and is valid
+if not os.path.exists(model_path):
+    print(f'Model file {model_path} not found locally. Attempting to download from Ultralytics...')
     try:
-        while True:
-            # Get frames from both cameras
-            frame1 = camera1.get_frame()
-            frame2 = camera2.get_frame()
-            
-            # Use fallback frame if camera frames are not available
-            if frame1 is None:
-                frame1 = fallback_frame.copy()
-                cv2.putText(frame1, "Cam1: No signal", (10, 15), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-            
-            if frame2 is None:
-                frame2 = fallback_frame.copy()
-                cv2.putText(frame2, "Cam2: No signal", (10, 15), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-            
-            # Use a fixed target height for consistency - even smaller for Pi 4
-            target_height = 144  # Reduced for Pi 4
-            
-            # Resize both frames to the same height while maintaining aspect ratio
-            aspect_ratio1 = frame1.shape[1] / frame1.shape[0]
-            aspect_ratio2 = frame2.shape[1] / frame2.shape[0]
-            
-            width1_new = int(target_height * aspect_ratio1)
-            width2_new = int(target_height * aspect_ratio2)
-            
-            frame1 = cv2.resize(frame1, (width1_new, target_height))
-            frame2 = cv2.resize(frame2, (width2_new, target_height))
-            
-            # Combine frames horizontally
-            combined_frame = np.hstack((frame1, frame2))
-            
-            # Increment frame counter
-            frame_count += 1
-            
-            # Calculate overall FPS occasionally
-            current_time = time.time()
-            if current_time - start_time >= 5.0:
-                fps = frame_count / (current_time - start_time)
-                print(f"Overall FPS: {fps:.2f}")
-                frame_count = 0
-                start_time = current_time
-            
-            # Display the combined frame
-            cv2.imshow('Dual Camera Human Detection', combined_frame)
-            
-            # Break the loop if 'q' is pressed - use a small fixed wait time
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            
-            # Sleep a tiny bit to avoid hogging CPU
-            time.sleep(0.03)  # Increased sleep time to reduce CPU usage
-    
-    except KeyboardInterrupt:
-        print("Stopping...")
+        # This will download the model if it doesn't exist locally
+        model = YOLO(model_path)
+        print(f'Model {model_path} downloaded successfully.')
     except Exception as e:
-        print(f"Error in main loop: {str(e)}")
-    finally:
-        # Stop the camera threads
-        print("Stopping camera threads...")
-        camera1.stop()
-        camera2.stop()
-        cv2.destroyAllWindows()
+        print(f'ERROR: Could not download model {model_path}. Error: {e}')
+        print('Available models include: yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt, yolov8x.pt')
+        sys.exit(0)
+else:
+    # Load the model into memory
+    model = YOLO(model_path, task='detect')
 
+# Get the class ID for 'person'
+# YOLO models typically have 'person' as class 0, but let's verify
+person_class_id = None
+for class_id, class_name in model.names.items():
+    if class_name.lower() == 'person':
+        person_class_id = class_id
+        break
 
-if __name__ == "__main__":
-    main() 
+if person_class_id is None:
+    print("ERROR: This model doesn't have a 'person' class. Please use a COCO-trained model.")
+    sys.exit(0)
+
+print(f"Person class ID: {person_class_id}")
+
+# Function to parse source type
+def parse_source(source):
+    # Check if it's a number (camera index)
+    try:
+        return 'camera', int(source)
+    except ValueError:
+        # Check if it's an RTSP URL
+        if source.startswith('rtsp://'):
+            return 'rtsp', source
+        # Otherwise assume it's a video file
+        elif os.path.isfile(source):
+            return 'video', source
+        else:
+            print(f'ERROR: Source {source} is invalid or not found.')
+            sys.exit(0)
+
+# Parse sources
+source1_type, source1_path = parse_source(source1)
+source2_type, source2_path = parse_source(source2)
+
+# Initialize video captures
+cap1 = cv2.VideoCapture(source1_path)
+cap2 = cv2.VideoCapture(source2_path)
+
+# Set camera resolutions
+cap1.set(3, resW)
+cap1.set(4, resH)
+cap2.set(3, resW)
+cap2.set(4, resH)
+
+# Check if cameras opened successfully
+if not cap1.isOpened():
+    print(f"Error: Could not open source 1: {source1}")
+    sys.exit(0)
+if not cap2.isOpened():
+    print(f"Error: Could not open source 2: {source2}")
+    sys.exit(0)
+
+# Get actual frame dimensions (might be different from requested)
+actual_width1 = int(cap1.get(cv2.CAP_PROP_FRAME_WIDTH))
+actual_height1 = int(cap1.get(cv2.CAP_PROP_FRAME_HEIGHT))
+actual_width2 = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
+actual_height2 = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+print(f"Camera 1 dimensions: {actual_width1}x{actual_height1}")
+print(f"Camera 2 dimensions: {actual_width2}x{actual_height2}")
+
+# Set up recording if enabled
+if record:
+    record_name1 = 'camera1_people.avi'
+    record_name2 = 'camera2_people.avi'
+    record_fps = 30
+    recorder1 = cv2.VideoWriter(record_name1, cv2.VideoWriter_fourcc(*'MJPG'), record_fps, (actual_width1, actual_height1))
+    recorder2 = cv2.VideoWriter(record_name2, cv2.VideoWriter_fourcc(*'MJPG'), record_fps, (actual_width2, actual_height2))
+    print(f"Recording to {record_name1} and {record_name2}")
+
+# Person bounding box color (blue)
+person_color = (255, 0, 0)  # BGR format
+
+# Create frame queues for each camera
+frame_queue1 = queue.Queue(maxsize=1)
+frame_queue2 = queue.Queue(maxsize=1)
+result_queue1 = queue.Queue(maxsize=1)
+result_queue2 = queue.Queue(maxsize=1)
+
+# Flag to signal threads to exit
+exit_flag = threading.Event()
+
+# Function to capture frames from a camera
+def capture_frames(cap, frame_queue, camera_num):
+    while not exit_flag.is_set():
+        ret, frame = cap.read()
+        
+        if not ret:
+            if camera_num == 1:
+                source_type = source1_type
+            else:
+                source_type = source2_type
+                
+            if source_type == 'rtsp':
+                print(f'Failed to read from camera {camera_num} RTSP stream. Retrying...')
+                time.sleep(1)
+                continue
+            else:
+                print(f'Failed to read from camera {camera_num}. Exiting.')
+                exit_flag.set()
+                break
+        
+        # Put frame in queue, replacing old frame if queue is full
+        if frame_queue.full():
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        frame_queue.put((frame, time.time()))
+        
+        # Small delay to prevent CPU overuse
+        time.sleep(0.01)
+
+# Function to process frames with YOLO for human detection
+def process_frames():
+    fps_buffer1 = []
+    fps_buffer2 = []
+    fps_avg_len = 30
+    
+    while not exit_flag.is_set():
+        # Process camera 1 if frame available
+        try:
+            frame1, timestamp1 = frame_queue1.get(timeout=0.1)
+            t_start1 = time.perf_counter()
+            
+            # Run inference
+            results1 = model(frame1, verbose=False)
+            
+            # Process results for human detection only
+            processed_frame1, person_count1 = process_detections(frame1, results1[0].boxes, "Camera 1")
+            
+            # Calculate FPS
+            t_end1 = time.perf_counter()
+            fps1 = 1 / (t_end1 - t_start1)
+            fps_buffer1.append(fps1)
+            if len(fps_buffer1) > fps_avg_len:
+                fps_buffer1.pop(0)
+            avg_fps1 = sum(fps_buffer1) / len(fps_buffer1)
+            
+            # Add FPS to frame if enabled
+            if show_fps:
+                cv2.putText(processed_frame1, f'FPS: {avg_fps1:.1f}', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Put processed frame in result queue
+            if result_queue1.full():
+                try:
+                    result_queue1.get_nowait()
+                except queue.Empty:
+                    pass
+            result_queue1.put(processed_frame1)
+            
+        except queue.Empty:
+            pass
+        
+        # Process camera 2 if frame available
+        try:
+            frame2, timestamp2 = frame_queue2.get(timeout=0.1)
+            t_start2 = time.perf_counter()
+            
+            # Run inference
+            results2 = model(frame2, verbose=False)
+            
+            # Process results for human detection only
+            processed_frame2, person_count2 = process_detections(frame2, results2[0].boxes, "Camera 2")
+            
+            # Calculate FPS
+            t_end2 = time.perf_counter()
+            fps2 = 1 / (t_end2 - t_start2)
+            fps_buffer2.append(fps2)
+            if len(fps_buffer2) > fps_avg_len:
+                fps_buffer2.pop(0)
+            avg_fps2 = sum(fps_buffer2) / len(fps_buffer2)
+            
+            # Add FPS to frame if enabled
+            if show_fps:
+                cv2.putText(processed_frame2, f'FPS: {avg_fps2:.1f}', (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Put processed frame in result queue
+            if result_queue2.full():
+                try:
+                    result_queue2.get_nowait()
+                except queue.Empty:
+                    pass
+            result_queue2.put(processed_frame2)
+            
+        except queue.Empty:
+            pass
+        
+        # Small delay to prevent CPU overuse
+        time.sleep(0.01)
+
+# Function to process detections and draw only people
+def process_detections(frame, detections, camera_label):
+    # Initialize person counter
+    person_count = 0
+    
+    # Process each detection
+    for i in range(len(detections)):
+        # Get class ID
+        class_id = int(detections[i].cls.item())
+        
+        # Only process if it's a person
+        if class_id == person_class_id:
+            # Get confidence
+            conf = detections[i].conf.item()
+            
+            # Check confidence threshold
+            if conf > min_thresh:
+                # Get bounding box coordinates
+                xyxy_tensor = detections[i].xyxy.cpu()
+                xyxy = xyxy_tensor.numpy().squeeze()
+                xmin, ymin, xmax, ymax = xyxy.astype(int)
+                
+                # Draw bounding box
+                cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), person_color, 2)
+                
+                # Add label with confidence
+                label = f'Person: {int(conf*100)}%'
+                labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                label_ymin = max(ymin, labelSize[1] + 10)
+                cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), 
+                             person_color, cv2.FILLED)
+                cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Increment person count
+                person_count += 1
+    
+    # Display person count
+    cv2.putText(frame, f'{camera_label}: {person_count} people', (10, 70), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    return frame, person_count
+
+# Start capture threads
+capture_thread1 = threading.Thread(target=capture_frames, args=(cap1, frame_queue1, 1))
+capture_thread2 = threading.Thread(target=capture_frames, args=(cap2, frame_queue2, 2))
+process_thread = threading.Thread(target=process_frames)
+
+capture_thread1.daemon = True
+capture_thread2.daemon = True
+process_thread.daemon = True
+
+capture_thread1.start()
+capture_thread2.start()
+process_thread.start()
+
+print("People detection started on both cameras. Press 'q' to quit, 'p' to save screenshots.")
+
+# Main display loop
+try:
+    while not exit_flag.is_set():
+        # Get processed frames if available
+        frame1 = None
+        frame2 = None
+        
+        try:
+            frame1 = result_queue1.get(block=False)
+        except queue.Empty:
+            pass
+            
+        try:
+            frame2 = result_queue2.get(block=False)
+        except queue.Empty:
+            pass
+            
+        # Display frames
+        if frame1 is not None:
+            cv2.imshow('Camera 1 - People Detection', frame1)
+            if record:
+                recorder1.write(frame1)
+                
+        if frame2 is not None:
+            cv2.imshow('Camera 2 - People Detection', frame2)
+            if record:
+                recorder2.write(frame2)
+        
+        # Check for key presses
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("Exiting...")
+            exit_flag.set()
+            break
+        elif key == ord('p'):
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            if frame1 is not None:
+                screenshot_name1 = f'camera1_people_{timestamp}.png'
+                cv2.imwrite(screenshot_name1, frame1)
+                print(f"Saved {screenshot_name1}")
+            if frame2 is not None:
+                screenshot_name2 = f'camera2_people_{timestamp}.png'
+                cv2.imwrite(screenshot_name2, frame2)
+                print(f"Saved {screenshot_name2}")
+                
+        time.sleep(0.01)  # Small delay to prevent CPU overuse
+
+except KeyboardInterrupt:
+    print("Interrupted by user")
+    exit_flag.set()
+
+finally:
+    # Clean up
+    exit_flag.set()
+    
+    # Wait for threads to finish
+    capture_thread1.join(timeout=1.0)
+    capture_thread2.join(timeout=1.0)
+    process_thread.join(timeout=1.0)
+    
+    # Release resources
+    cap1.release()
+    cap2.release()
+    if record:
+        recorder1.release()
+        recorder2.release()
+    cv2.destroyAllWindows()
+    
+    print("Clean exit complete") 
