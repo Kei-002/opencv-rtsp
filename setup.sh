@@ -1,98 +1,99 @@
 #!/bin/bash
 
-echo "Setting up Human Detection with RTSP Camera for Raspberry Pi 4"
-echo "=============================================================="
+echo "==== YOLO Video Detection System Setup ===="
+echo "This script will set up the environment for YOLO-based video detection"
+echo
 
-# Update system
-echo "[1/9] Updating system packages..."
-sudo apt-get update
-sudo apt-get upgrade -y
-
-# Check if FFmpeg is installed
-echo "[2/9] Checking for FFmpeg..."
-if command -v ffmpeg &> /dev/null; then
-    echo "FFmpeg is already installed."
+# Detect OS
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$NAME
+    echo "Detected OS: $OS"
 else
-    echo "FFmpeg is not installed. Installing now..."
-    sudo apt-get install -y ffmpeg
+    OS="Unknown"
+    echo "Could not detect OS, assuming Linux-based system"
+fi
+
+# Check if we're on a Raspberry Pi
+IS_RASPBERRY_PI=false
+if [ -f /proc/device-tree/model ] && grep -q "Raspberry Pi" /proc/device-tree/model; then
+    IS_RASPBERRY_PI=true
+    echo "Detected Raspberry Pi hardware"
 fi
 
 # Install system dependencies
-echo "[3/9] Installing system dependencies..."
-sudo apt-get install -y python3-pip python3-dev python3-venv libgl1-mesa-glx
-
-# Install OpenCV system dependencies
-echo "[4/9] Installing OpenCV system dependencies..."
-sudo apt-get install -y libopencv-dev python3-opencv
+echo
+echo "Installing system dependencies..."
+if [[ "$OS" == *"Ubuntu"* ]] || [[ "$OS" == *"Debian"* ]] || [[ "$OS" == *"Raspbian"* ]]; then
+    sudo apt-get update
+    sudo apt-get install -y python3-pip python3-dev python3-venv
+    sudo apt-get install -y libopencv-dev ffmpeg libgl1-mesa-glx
+    
+    # Additional packages for Raspberry Pi
+    if [ "$IS_RASPBERRY_PI" = true ]; then
+        echo "Installing Raspberry Pi specific packages..."
+        sudo apt-get install -y python3-picamera2
+    fi
+elif [[ "$OS" == *"CentOS"* ]] || [[ "$OS" == *"Red Hat"* ]] || [[ "$OS" == *"Fedora"* ]]; then
+    sudo dnf update -y
+    sudo dnf install -y python3-pip python3-devel python3-virtualenv
+    sudo dnf install -y opencv-devel ffmpeg mesa-libGL
+else
+    echo "Unsupported OS for automatic dependency installation"
+    echo "Please install the following packages manually:"
+    echo "- Python 3.8+ with pip and venv"
+    echo "- OpenCV development libraries"
+    echo "- FFmpeg"
+    echo "- Mesa GL libraries"
+fi
 
 # Create virtual environment
-echo "[5/9] Creating Python virtual environment..."
-python3 -m venv venv --system-site-packages
+echo
+echo "Creating Python virtual environment..."
+python3 -m venv venv
 source venv/bin/activate
 
+# Upgrade pip and install wheel
+echo
+echo "Upgrading pip and installing wheel..."
+pip install --upgrade pip
+pip install wheel setuptools
+
 # Install Python dependencies
-echo "[6/9] Installing Python dependencies in virtual environment..."
-pip3 install --upgrade pip
-pip3 install wheel setuptools
+echo
+echo "Installing Python dependencies from requirements.txt..."
+pip install -r requirements.txt
 
-# Try to install OpenCV in the virtual environment
-echo "[7/9] Installing OpenCV in virtual environment..."
-pip3 install opencv-python || echo "Using system OpenCV instead"
+# Download YOLOv8 model
+echo
+echo "Downloading YOLOv8n model..."
+python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
-# Install other requirements
-echo "[8/9] Installing other Python dependencies..."
-pip3 install numpy
-pip3 install ultralytics
-pip3 install ffmpeg-python
-
-# Pre-download YOLOv8 model
-echo "[9/9] Downloading YOLOv8 model (this may take a few minutes)..."
-python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" || echo "Failed to download model - will download on first run"
-
-# Make scripts executable
-echo "Making scripts executable..."
-chmod +x human_detection.py
-chmod +x stream_to_vlc.py
-
-# Create activation script
-echo "Creating activation script..."
+# Create run script
+echo
+echo "Creating run.sh script for activating the environment..."
 cat > run.sh << 'EOL'
 #!/bin/bash
 source venv/bin/activate
-echo "Virtual environment activated. You can now run:"
-echo "  python human_detection.py"
-echo "  or"
-echo "  python stream_to_vlc.py"
+echo "Virtual environment activated. You can now run the detection scripts:"
+echo "  python test_yolo.py           # General object detection"
+echo "  python human_detection.py     # Human-only detection"
+echo "  python dual_camera_yolo.py    # Dual camera detection"
+echo
+echo "Press Ctrl+D or type 'deactivate' to exit the virtual environment"
+exec "${SHELL:-bash}"
 EOL
+
 chmod +x run.sh
 
-# Create a test script to verify OpenCV
-echo "Creating test script..."
-cat > test_opencv.py << 'EOL'
-#!/usr/bin/env python3
-try:
-    import cv2
-    print("OpenCV is installed correctly! Version:", cv2.__version__)
-except ImportError:
-    print("ERROR: OpenCV (cv2) module not found")
-EOL
-chmod +x test_opencv.py
-
-echo ""
-echo "Setup completed successfully!"
-echo ""
-echo "To test if OpenCV is installed correctly:"
+echo
+echo "Setup complete!"
+echo
+echo "To activate the environment and run the scripts:"
 echo "  ./run.sh"
-echo "  python test_opencv.py"
-echo ""
-echo "To run human detection:"
-echo "  ./run.sh"
-echo "  python human_detection.py"
-echo ""
-echo "Or to run human detection and stream to VLC:"
-echo "  ./run.sh"
-echo "  python stream_to_vlc.py"
-echo "  Then open VLC and connect to: udp://127.0.0.1:5000"
-echo ""
-echo "Don't forget to update the RTSP URL in the scripts with your camera details!"
-echo "==============================================================" 
+echo
+echo "Example commands:"
+echo "  python test_yolo.py --source rtsp://your_camera_url"
+echo "  python human_detection.py --source 0 --resolution 1280x720"
+echo "  python dual_camera_yolo.py --source1 rtsp://camera1_url --source2 rtsp://camera2_url"
+echo 

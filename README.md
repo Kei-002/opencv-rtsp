@@ -1,186 +1,135 @@
-# Human Detection with RTSP Camera
+# YOLO-based Video Detection System
 
-This project uses Ultralytics YOLOv8 to detect humans from RTSP camera feeds on a Raspberry Pi 4 Model B.
+This repository contains a collection of Python scripts for object detection using YOLO (You Only Look Once) models on various video sources including RTSP streams, video files, and USB cameras.
 
-## Prerequisites
+## Credits
 
-- Raspberry Pi 4 Model B
-- RTSP camera(s) - supports both single and dual camera setups
-- Python 3.7+
-- FFmpeg (required for VLC streaming option)
+These scripts are based on work by [EdjeElectronics](https://github.com/EdjeElectronics), who has created excellent tutorials and examples for implementing object detection on various platforms. The original concepts have been adapted and extended for this project.
 
-## Setup with Virtual Environment (Recommended)
+## Features
 
-The easiest way to set up everything is using the provided setup script:
+- **General Object Detection** (`test_yolo.py`): Detect and display all objects from COCO dataset
+- **Human Detection** (`human_detection.py`): Focus specifically on detecting people
+- **Dual Camera Processing** (`dual_camera_yolo.py`): Process two video streams simultaneously
+- **Support for Multiple Sources**:
+  - RTSP streams
+  - Video files
+  - USB cameras
+  - Picamera (Raspberry Pi)
+- **Recording Capability**: Save detection results as video files
+- **Flexible Configuration**: Adjust resolution, confidence thresholds, and more
 
-1. Make the setup script executable:
-```
-chmod +x setup.sh
-```
+## Requirements
 
-2. Run the setup script:
-```
-./setup.sh
-```
+- Python 3.8+
+- OpenCV
+- Ultralytics YOLO
+- NumPy
+- Other dependencies (see `requirements.txt`)
 
-This script will:
-- Update your system
-- Install required system dependencies
-- Create a Python virtual environment
-- Install all required Python packages from requirements.txt
-- Download the YOLOv8 model
-- Create a run.sh script to activate the environment
+## Installation
 
-3. After setup completes, activate the virtual environment:
-```
-./run.sh
-```
+1. Clone this repository:
+   ```
+   git clone https://github.com/yourusername/yolo-detection.git
+   cd yolo-detection
+   ```
 
-## Manual Setup (Alternative)
+2. Create a virtual environment (recommended):
+   ```
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-If you prefer to set up manually:
+3. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
 
-1. Update your Raspberry Pi:
-```
-sudo apt-get update
-sudo apt-get upgrade
-```
+4. Run the setup script (optional):
+   ```
+   bash setup.sh
+   ```
 
-2. Install required system dependencies:
-```
-sudo apt-get install -y python3-pip python3-dev python3-venv libopencv-dev ffmpeg libgl1-mesa-glx
-```
+## Usage
 
-3. Create and activate a virtual environment:
-```
-python3 -m venv venv --system-site-packages
-source venv/bin/activate
-```
+### General Object Detection
 
-4. Install the required Python dependencies:
-```
-pip install --upgrade pip
-pip install wheel setuptools
-pip install -r requirements.txt
-```
+```bash
+# Basic usage with default RTSP stream
+python test_yolo.py
 
-5. Download the YOLOv8 model:
-```
-python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
-```
+# Specify a different source
+python test_yolo.py --source your_video.mp4
 
-## Configuration
+# Use USB camera
+python test_yolo.py --source usb0
 
-Edit the script files to update the RTSP URLs with your camera details:
-
-For single camera:
-```python
-rtsp_url = "rtsp://username:password@camera_ip:port/stream"
+# Custom model and resolution
+python test_yolo.py --model yolov8m.pt --resolution 1280x720
 ```
 
-For dual cameras:
-```python
-rtsp_url1 = "rtsp://username:password@camera1_ip:port/stream"
-rtsp_url2 = "rtsp://username:password@camera2_ip:port/stream"
-```
+### Human-Only Detection
 
-## Usage Options
-
-### Single Camera
-
-#### Option 1: Direct Display (OpenCV Window)
-
-1. Activate the virtual environment (if not already activated):
-```
-./run.sh
-```
-
-2. Run the script:
-```
+```bash
+# Basic usage with default RTSP stream
 python human_detection.py
+
+# Use a USB camera (camera index 0)
+python human_detection.py --source 0
+
+# Record detection results
+python human_detection.py --source rtsp://your_camera_url --record
 ```
 
-- Press 'q' to quit the application
-- The script will display the camera feed with bounding boxes around detected humans
-- FPS is displayed in the top-left corner
+### Dual Camera Detection
 
-#### Option 2: Stream to VLC (DOES NOT WORK ATM)
+```bash
+# Basic usage with default RTSP streams
+python dual_camera_yolo.py
 
-1. Activate the virtual environment (if not already activated):
-```
-./run.sh
-```
+# Specify custom sources
+python dual_camera_yolo.py --source1 rtsp://camera1_url --source2 rtsp://camera2_url
 
-2. Run the streaming script:
-```
-python stream_to_vlc.py
+# Use USB cameras
+python dual_camera_yolo.py --source1 0 --source2 1
 ```
 
-3. Open VLC media player:
-```
-vlc
-```
-   - Go to Media > Open Network Stream
-   - Enter `udp://127.0.0.1:5000` as the network URL
-   - Click Play
+## Setting up RTSP Streams for Testing
 
-4. To stop the stream, press Ctrl+C in the terminal where the script is running
+### Using VLC for Local Testing
 
-### Dual Cameras
+You can create a local RTSP stream using VLC for testing:
 
-#### Option 1: Direct Display (OpenCV Window)
+1. Open VLC
+2. Go to Media > Stream
+3. Add your video file
+4. Click "Stream"
+5. Choose RTSP as the protocol
+6. Set path as "/video"
+7. Set port to 8554
+8. Start streaming
 
-1. Activate the virtual environment:
-```
-./run.sh
-```
+Your stream will be available at `rtsp://127.0.0.1:8554/video`
 
-2. Run the dual camera script:
-```
-python dual_camera_detection.py
-```
+## Key Controls
 
-- Press 'q' to quit the application
-- The script will display both camera feeds side by side with human detection
-- FPS is displayed for each camera
+- Press `q` to quit
+- Press `s` to pause/resume (in single camera modes)
+- Press `p` to save a screenshot
 
-#### Option 2: Stream to VLC
+## Customization
 
-1. Activate the virtual environment:
-```
-./run.sh
-```
-
-2. Run the dual camera streaming script:
-```
-python dual_camera_stream_vlc.py
-```
-
-3. Open VLC media player and connect to `udp://127.0.0.1:5000`
-
-## Performance Notes
-
-- The scripts process every 3rd frame to improve performance on the Raspberry Pi
-- Using YOLOv8n (nano) model for better performance
-- Resolution is set to 640x480 for better performance
-- Only detections with confidence > 0.5 are displayed
-- The dual camera setup uses threading to process both cameras efficiently
+- Models: The scripts default to YOLOv8n but can use any Ultralytics-compatible model
+- Resolution: Adjust with `--resolution WIDTHxHEIGHT` parameter
+- Confidence threshold: Set with `--thresh VALUE` (0.0-1.0)
 
 ## Troubleshooting
 
-If you encounter issues:
+- **Stream Connection Issues**: Check your network connection and verify the RTSP URL
+- **Performance Problems**: Try a smaller model (yolov8n) or reduce resolution
+- **CUDA Errors**: Ensure your GPU drivers are up to date
 
-1. Verify your RTSP URL is correct
-2. Ensure your camera is accessible on the network
-3. Check that all dependencies are installed correctly
-4. If you see "ImportError: No module named cv2" or other module errors:
-   - Make sure you've activated the virtual environment with `./run.sh`
-   - Try reinstalling the package in the virtual environment
-5. If you see "ImportError: libGL.so.1: cannot open shared object file":
-   ```
-   sudo apt-get install libgl1-mesa-glx
-   ```
-6. For FFmpeg issues:
-   ```
-   sudo apt-get install --reinstall ffmpeg
-   ``` 
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 
